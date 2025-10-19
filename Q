@@ -1,0 +1,130 @@
+import os
+import re
+import uuid
+import yt_dlp
+import logging
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+# --- Configuration ---
+# Replace this with your actual Telegram Bot Token from BotFather
+BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+# Directory to temporarily store video files before uploading
+DOWNLOAD_DIR = "temp_downloads"
+
+# Setup basic logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Ensure the download directory exists
+if not os.path.exists(DOWNLOAD_DIR):
+    os.makedirs(DOWNLOAD_DIR)
+    logger.info(f"Created temporary download directory: {DOWNLOAD_DIR}")
+
+# Regex to quickly check if the message contains a common YouTube URL format
+YOUTUBE_URL_PATTERN = re.compile(r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/|youtube\.com\/live\/)([a-zA-Z0-9_-]{11})')
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends a welcome message when the /start command is issued."""
+    await update.message.reply_text(
+        'Hello! Send me a YouTube video link (watch?v=, youtu.be, or shorts) and I will download and upload it for you!'
+    )
+
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles incoming text, checks for a URL, and starts the download/upload process."""
+    url_match = YOUTUBE_URL_PATTERN.search(update.message.text)
+
+    if not url_match:
+        await update.message.reply_text("Please send a valid YouTube link.")
+        return
+
+    # Extract the full URL to ensure yt-dlp gets the context right
+    youtube_url = url_match.group(0)
+    
+    # Generate a unique filename for the temporary file
+    temp_filename = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4().hex}.mp4")
+    
+    # Send initial status message
+    status_message = await update.message.reply_text(
+        f"🔍 Found link: {youtube_url}\n\n⏳ Starting download..."
+    )
+
+    try:
+        # yt-dlp options: prefer best quality mp4
+        ydl_opts = {
+            # Use 'bestvideo+bestaudio/best' and specify we want MP4 output
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            # Template for the output file path. Ensure the extension is consistent.
+            'outtmpl': temp_filename,
+            'noplaylist': True, # Only download a single video, not a playlist
+            'retries': 3,
+            'quiet': True,
+            'noprogress': True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # This downloads the file to the path specified in 'outtmpl'
+            info_dict = ydl.extract_info(youtube_url, download=True)
+            video_title = info_dict.get('title', 'YouTube Video')
+
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=status_message.message_id,
+            text=f"✅ Download complete: {video_title}\n\n📤 Starting upload to Telegram..."
+        )
+
+        # Upload the video file
+        with open(temp_filename, 'rb') as video_file:
+            await update.message.reply_video(
+                video=video_file, 
+                caption=f"**{video_title}**\n\nDownloaded via bot.",
+                supports_streaming=True
+            )
+
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=status_message.message_id,
+            text=f"🚀 Upload successful! Title: {video_title}"
+        )
+
+    except yt_dlp.DownloadError as e:
+        logger.error(f"Download Error for {youtube_url}: {e}")
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=status_message.message_id,
+            text="❌ Error during download. The link might be broken, private, or geo-restricted."
+        )
+    except Exception as e:
+        logger.error(f"An unexpected error occurred: {e}")
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=status_message.message_id,
+            text="❌ An unexpected error occurred during processing."
+        )
+    finally:
+        # --- Cleanup ---
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+            logger.info(f"Cleaned up temporary file: {temp_filename}")
+        
+def main() -> None:
+    """Start the bot."""
+    # Create the Application and pass it your bot's token.
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # on different commands - answer in Telegram
+    application.add_handler(CommandHandler("start", start))
+
+    # on non-command i.e. message containing a URL - call the handle_url function
+    # It only processes text messages that match the YouTube pattern
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(YOUTUBE_URL_PATTERN) & ~filters.COMMAND, handle_url))
+    
+    # Run the bot until the user presses Ctrl-C
+    logger.info("Bot is running...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    main()
