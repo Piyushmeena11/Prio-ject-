@@ -1,1 +1,1 @@
-web: gunicorn main:app
+woker: gunicorn main:app
